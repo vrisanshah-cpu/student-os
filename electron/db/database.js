@@ -22,9 +22,8 @@ function initDatabase() {
   db.exec(schema);
 
   runMigrations(db);
-  seedScheduleIfNeeded(db);
-  seedRealClassScheduleIfNeeded(db);
-  seedDailyRoutineIfNeeded(db);
+  seedSampleClassScheduleIfNeeded(db);
+  seedSampleDailyRoutineIfNeeded(db);
 
   return db;
 }
