@@ -1,0 +1,17 @@
+node_modules/
+dist/
+dist-electron/
+release/
+*.log
+npm-debug.log*
+
+# Local runtime data - never ship a real user's database, tokens, or attachments
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+
+.DS_Store
+Thumbs.db
+
+.env
+.env.local

@@ -1,0 +1,369 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  ::selection {
+    @apply bg-accent/30;
+  }
+  * {
+    @apply border-base-border;
+  }
+  /* Visible keyboard focus everywhere, not just inside the editor. */
+  :focus-visible {
+    outline: 2px solid theme('colors.accent.DEFAULT');
+    outline-offset: 2px;
+    border-radius: 4px;
+  }
+
+  /* One quiet, consistent transition felt on every interactive element -
+     hover/active/focus states ease in instead of snapping. Deliberately
+     generic (color/background/border/opacity/transform) rather than added
+     per-component, and off entirely for anyone who's asked for less motion. */
+  @media (prefers-reduced-motion: no-preference) {
+    a,
+    button,
+    input,
+    select,
+    textarea,
+    [role='button'],
+    [class*='hover:'] {
+      transition-property: color, background-color, border-color, box-shadow, opacity, transform;
+      transition-duration: 160ms;
+      transition-timing-function: cubic-bezier(0.16, 1, 0.3, 1);
+    }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+    }
+  }
+}
+
+@layer components {
+  .panel {
+    @apply bg-base-panel border border-base-border rounded-xl2;
+  }
+  .card {
+    @apply bg-base-card border border-base-border rounded-xl2 p-6 shadow-elevated;
+  }
+  .label-eyebrow {
+    @apply text-xs uppercase tracking-[0.14em] text-base-muted font-mono;
+  }
+
+  /* Shared modal language: a frosted scrim behind a panel that eases in -
+     the one deliberate "glass" moment used consistently everywhere a modal
+     appears, rather than sprinkled ad hoc. */
+  .modal-backdrop {
+    @apply fixed inset-0 z-50 flex items-center justify-center bg-base-bg/60 backdrop-blur-sm p-4;
+    animation: modal-backdrop-in 160ms cubic-bezier(0.16, 1, 0.3, 1);
+  }
+  .modal-panel {
+    @apply panel bg-base-panel w-full;
+    animation: modal-panel-in 180ms cubic-bezier(0.16, 1, 0.3, 1);
+  }
+  @keyframes modal-backdrop-in {
+    from { opacity: 0; }
+    to { opacity: 1; }
+  }
+  @keyframes modal-panel-in {
+    from { opacity: 0; transform: translateY(6px) scale(0.98); }
+    to { opacity: 1; transform: translateY(0) scale(1); }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .modal-backdrop, .modal-panel { animation: none; }
+  }
+
+  /* Calendar view's signature moment - switching month/week/day or paging
+     the date range settles in with a gentle cross-fade + rise. */
+  .calendar-view-transition {
+    animation: calendar-view-in 220ms cubic-bezier(0.16, 1, 0.3, 1);
+  }
+  @keyframes calendar-view-in {
+    from { opacity: 0; transform: translateY(4px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .calendar-view-transition { animation: none; }
+  }
+}
+
+/* ---------- The notebook page (rich text note editor) ---------- */
+
+.editor-page {
+  background: theme('colors.paper.DEFAULT');
+  border-radius: theme('borderRadius.xl2');
+  box-shadow: theme('boxShadow.page');
+  position: relative;
+  /* A single ruled margin line down the left, like a school notebook. */
+  border-left: 2px solid theme('colors.accent.DEFAULT' / 25%);
+}
+
+.editor-page::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  box-shadow: inset 0 0 0 1px theme('colors.paper.rule');
+  pointer-events: none;
+}
+
+.tiptap-content {
+  font-family: theme('fontFamily.manuscript');
+  color: theme('colors.paper.ink');
+  font-size: 1.0625rem;
+  line-height: 1.75;
+}
+
+.tiptap-content:focus {
+  outline: none;
+}
+
+.tiptap-content p.is-editor-empty:first-child::before {
+  content: attr(data-placeholder);
+  float: left;
+  color: theme('colors.paper.muted');
+  pointer-events: none;
+  height: 0;
+  font-style: italic;
+}
+
+.tiptap-content h1,
+.tiptap-content h2,
+.tiptap-content h3 {
+  font-family: theme('fontFamily.display');
+  color: theme('colors.paper.ink');
+  font-weight: 600;
+  line-height: 1.25;
+}
+.tiptap-content h1 {
+  font-size: 1.6rem;
+  margin: 1.4em 0 0.5em;
+}
+.tiptap-content h2 {
+  font-size: 1.3rem;
+  margin: 1.3em 0 0.5em;
+}
+.tiptap-content h3 {
+  font-size: 1.1rem;
+  margin: 1.1em 0 0.4em;
+}
+.tiptap-content h1:first-child,
+.tiptap-content h2:first-child,
+.tiptap-content h3:first-child {
+  margin-top: 0;
+}
+.tiptap-content p {
+  margin: 0.6em 0;
+}
+.tiptap-content ul,
+.tiptap-content ol {
+  margin: 0.6em 0;
+  padding-left: 1.4em;
+}
+.tiptap-content ul {
+  list-style: disc;
+}
+.tiptap-content ol {
+  list-style: decimal;
+}
+.tiptap-content li {
+  margin: 0.2em 0;
+}
+.tiptap-content blockquote {
+  border-left: 3px solid theme('colors.accent.DEFAULT');
+  padding-left: 0.9em;
+  margin: 0.8em 0;
+  color: theme('colors.paper.muted');
+  font-style: italic;
+}
+.tiptap-content code {
+  font-family: theme('fontFamily.mono');
+  font-size: 0.85em;
+  background: theme('colors.paper.rule' / 60%);
+  padding: 0.1em 0.35em;
+  border-radius: 4px;
+}
+.tiptap-content pre {
+  font-family: theme('fontFamily.mono');
+  font-size: 0.85em;
+  background: theme('colors.base.bg');
+  color: theme('colors.base.text');
+  padding: 0.8em 1em;
+  border-radius: 10px;
+  overflow-x: auto;
+}
+.tiptap-content pre code {
+  background: none;
+  padding: 0;
+}
+.tiptap-content mark {
+  background: theme('colors.accent.warn' / 55%);
+  border-radius: 3px;
+  padding: 0 0.1em;
+}
+.tiptap-content a {
+  color: theme('colors.accent.soft');
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.tiptap-content hr {
+  border: none;
+  border-top: 1px dashed theme('colors.paper.rule');
+  margin: 1.6em 0;
+}
+.tiptap-content ul[data-type='taskList'] {
+  list-style: none;
+  padding-left: 0;
+}
+.tiptap-content ul[data-type='taskList'] li {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5em;
+  margin: 0.3em 0;
+}
+.tiptap-content ul[data-type='taskList'] li > label {
+  margin-top: 0.3em;
+  user-select: none;
+}
+.tiptap-content ul[data-type='taskList'] li > div {
+  flex: 1;
+}
+.tiptap-content ul[data-type='taskList'] li[data-checked='true'] > div {
+  color: theme('colors.paper.muted');
+  text-decoration: line-through;
+}
+.tiptap-content input[type='checkbox'] {
+  accent-color: theme('colors.accent.DEFAULT');
+  width: 15px;
+  height: 15px;
+}
+
+/* Ghost-text autocomplete (Gemini) - an inline widget, never part of the doc
+   until Tab is pressed, so it can never accidentally get saved. */
+.ghost-suggestion {
+  color: theme('colors.paper.muted');
+  opacity: 0.7;
+  pointer-events: none;
+  user-select: none;
+}
+
+/* Resizable image node - reset the browser's default <figure> margin */
+.tiptap-content figure[data-resizable-image] {
+  margin: 0;
+}
+
+/* Inline math chips (custom TipTap node, rendered via KaTeX) */
+.math-chip {
+  display: inline-flex;
+  align-items: center;
+  background: theme('colors.accent.DEFAULT' / 12%);
+  border: 1px solid theme('colors.accent.DEFAULT' / 30%);
+  border-radius: 6px;
+  padding: 0 0.3em;
+  margin: 0 0.05em;
+  cursor: text;
+}
+.math-chip.is-selected {
+  outline: 2px solid theme('colors.accent.DEFAULT');
+}
+.math-chip input {
+  font-family: theme('fontFamily.mono');
+  font-size: 0.85em;
+  background: transparent;
+  border: none;
+  outline: none;
+  width: auto;
+  min-width: 2ch;
+  color: theme('colors.paper.ink');
+}
+
+/* Block-level (display-style) equations - centered, standalone lines */
+.math-block-chip {
+  position: relative;
+  background: theme('colors.accent.DEFAULT' / 6%);
+  border: 1px solid theme('colors.accent.DEFAULT' / 20%);
+  border-radius: 10px;
+  padding: 0.6em 1em;
+  cursor: text;
+}
+.math-block-chip.is-selected {
+  outline: 2px solid theme('colors.accent.DEFAULT');
+}
+.math-block-chip input {
+  width: 100%;
+  font-family: theme('fontFamily.mono');
+  font-size: 0.9em;
+  background: theme('colors.paper.raised');
+  border: 1px solid theme('colors.paper.rule');
+  border-radius: 6px;
+  padding: 0.4em 0.6em;
+  outline: none;
+  color: theme('colors.paper.ink');
+}
+.math-block-chip input:focus {
+  border-color: theme('colors.accent.DEFAULT');
+}
+.math-block-chip .katex-display {
+  margin: 0;
+}
+
+/* ---------- AI-generated markdown preview (still in dark chrome) ---------- */
+
+.prose-note :where(h1, h2, h3) {
+  @apply font-display font-semibold text-base-text;
+}
+.prose-note h1 {
+  @apply text-lg mt-4 mb-2;
+}
+.prose-note h2 {
+  @apply text-base mt-4 mb-2;
+}
+.prose-note h3 {
+  @apply text-sm mt-3 mb-2;
+}
+.prose-note p {
+  @apply my-2;
+}
+.prose-note ul {
+  @apply list-disc pl-5 my-2 space-y-1;
+}
+.prose-note ol {
+  @apply list-decimal pl-5 my-2 space-y-1;
+}
+.prose-note blockquote {
+  @apply border-l-2 border-accent/40 pl-3 text-base-muted italic my-2;
+}
+.prose-note code {
+  @apply font-mono text-xs bg-base-card px-1 py-1 rounded;
+}
+.prose-note mark {
+  @apply bg-accent-warn/40 rounded px-1;
+}
+.prose-note a {
+  @apply text-accent underline underline-offset-2;
+}
+
+/* ---------- Printing a note / Save as PDF ---------- */
+@media print {
+  body * {
+    visibility: hidden;
+  }
+  .print-page,
+  .print-page * {
+    visibility: visible;
+  }
+  .print-page {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 100%;
+    box-shadow: none !important;
+    border-left: none !important;
+  }
+  .print-page::before {
+    display: none;
+  }
+}
