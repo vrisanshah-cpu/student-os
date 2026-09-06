@@ -1,8 +1,9 @@
-import { LayoutGrid, CalendarDays, CalendarRange, NotebookText, Settings, Sun, Search, Sparkles } from 'lucide-react';
+import { LayoutGrid, CalendarDays, CalendarRange, NotebookText, Settings, Sun, Search, Sparkles, Compass } from 'lucide-react';
 
 const NAV_ITEMS = [
   { id: 'dashboard', label: 'Dashboard', icon: LayoutGrid },
   { id: 'calendar', label: 'Calendar', icon: CalendarRange },
+  { id: 'campus', label: 'Campus Map', icon: Compass },
   { id: 'planner', label: 'Daily Planner', icon: CalendarDays },
   { id: 'notes', label: 'Notes', icon: NotebookText },
   { id: 'reminders', label: 'Reminders', icon: Sun },

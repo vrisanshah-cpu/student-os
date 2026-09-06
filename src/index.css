@@ -367,3 +367,49 @@
     display: none;
   }
 }
+
+/* ---------- Campus map ("holographic" HUD styling) ---------- */
+
+.holo-scene {
+  background-image: radial-gradient(circle at 50% 0%, rgba(45, 226, 230, 0.06), transparent 55%),
+    linear-gradient(rgba(45, 226, 230, 0.05) 1px, transparent 1px), linear-gradient(90deg, rgba(45, 226, 230, 0.05) 1px, transparent 1px);
+  background-size: auto, 32px 32px, 32px 32px;
+}
+
+.holo-card,
+.holo-panel {
+  position: relative;
+  background: linear-gradient(180deg, rgba(45, 226, 230, 0.08), rgba(22, 25, 35, 0.6));
+  border: 1px solid theme('colors.holo.DEFAULT' / 35%);
+  box-shadow: 0 0 0 1px theme('colors.holo.DEFAULT' / 8%), 0 0 40px -12px theme('colors.holo.DEFAULT' / 45%),
+    inset 0 1px 0 theme('colors.holo.DEFAULT' / 15%);
+  backdrop-filter: blur(6px);
+}
+
+.holo-panel {
+  perspective: 900px;
+  transform: rotateX(1.5deg);
+  transition: transform 300ms theme('transitionTimingFunction.DEFAULT');
+}
+.holo-panel:hover {
+  transform: rotateX(0deg);
+}
+
+.holo-target {
+  border: 1px solid theme('colors.holo.DEFAULT');
+  color: theme('colors.holo.DEFAULT');
+  background: theme('colors.holo.DEFAULT' / 15%);
+  box-shadow: 0 0 12px 1px theme('colors.holo.DEFAULT' / 55%);
+  animation: holo-pulse 1.8s ease-in-out infinite;
+  position: relative;
+}
+
+@keyframes holo-pulse {
+  0%,
+  100% {
+    box-shadow: 0 0 8px 0 theme('colors.holo.DEFAULT' / 45%);
+  }
+  50% {
+    box-shadow: 0 0 18px 4px theme('colors.holo.DEFAULT' / 70%);
+  }
+}

@@ -3,6 +3,7 @@ import TopBar from './components/layout/TopBar.jsx';
 import Sidebar from './components/layout/Sidebar.jsx';
 import Dashboard from './components/dashboard/Dashboard.jsx';
 import CalendarView from './components/calendar/CalendarView.jsx';
+import CampusMap from './components/campus/CampusMap.jsx';
 import DailyPlanner from './components/planner/DailyPlanner.jsx';
 import NoteStudio from './components/notes/NoteStudio.jsx';
 import RemindersPage from './components/reminders/RemindersPage.jsx';
@@ -45,6 +46,7 @@ export default function App() {
         <main className="flex-1 overflow-hidden flex flex-col">
           {activeView === 'dashboard' && <Dashboard onNavigate={setActiveView} />}
           {activeView === 'calendar' && <CalendarView />}
+          {activeView === 'campus' && <CampusMap />}
           {activeView === 'planner' && <DailyPlanner />}
           {activeView === 'notes' && (
             <NoteStudio

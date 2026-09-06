@@ -86,16 +86,28 @@ const api = {
   saveImageData: (payload) => window.studyOS.invoke('file:saveImageData', payload),
 
   // Sync
-  syncPowerSchool: (icsUrl) => window.studyOS.invoke('sync:powerschool', icsUrl),
   generateStudyBlocks: (deadlineId, desiredBlocks) =>
     window.studyOS.invoke('sync:generateStudyBlocks', { deadlineId, desiredBlocks }),
   pushBlocksToGoogle: (deadlineId, title) =>
     window.studyOS.invoke('sync:pushBlocksToGoogle', { deadlineId, title }),
 
+  // ICS calendar sources (per-class calendars, school events, day schedule, etc)
+  icsListSources: () => window.studyOS.invoke('ics:listSources'),
+  icsCreateSource: (source) => window.studyOS.invoke('ics:createSource', source),
+  icsUpdateSource: (source) => window.studyOS.invoke('ics:updateSource', source),
+  icsDeleteSource: (id) => window.studyOS.invoke('ics:deleteSource', id),
+  icsSyncSource: (id) => window.studyOS.invoke('ics:syncSource', id),
+  icsSyncAll: () => window.studyOS.invoke('ics:syncAll'),
+
   // Google accounts (Calendar + Classroom share one connected-account list).
   // A single call: opens the system browser, runs a local loopback server to
   // catch the redirect, exchanges the code, and resolves once the account is saved.
-  googleConnect: (label) => window.studyOS.invoke('google:connect', { label }),
+  googleConnect: (label, calendarOnly = false) => window.studyOS.invoke('google:connect', { label, calendarOnly }),
+  // Fired once per connect attempt as soon as the consent URL is built (well
+  // before the call above resolves) - lets the UI offer the link as text/a
+  // copy button in case auto-launching the OS default browser picks the
+  // wrong browser or profile.
+  onGoogleAuthUrl: (callback) => window.studyOS.on('google:authUrl', callback),
   googleListAccounts: () => window.studyOS.invoke('google:listAccounts'),
   googleRemoveAccount: (id) => window.studyOS.invoke('google:removeAccount', id),
 

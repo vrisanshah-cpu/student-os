@@ -3,51 +3,99 @@ const { google } = require('googleapis');
 const https = require('https');
 
 /**
- * ---- PowerSchool ICS Sync ----
- * PowerSchool (and most SIS portals) expose a "subscribe" ICS feed URL
- * under the calendar/export settings. We fetch it, parse VEVENTs, and
- * map them into deadline rows (homework/exam) the caller can upsert.
+ * ---- ICS calendar sync (PowerSchool, per-class school calendars, school-
+ * wide events, a rotating day-schedule feed, etc) ----
+ * Any of these expose a "subscribe"/"secret address" ICS feed URL. We fetch
+ * it, parse VEVENTs, and map them into full calendar-event shape (title,
+ * start, end, all-day) - the caller decides how to store/classify them.
  */
-function fetchICS(url) {
+function fetchICS(url, redirectsLeft = 5) {
   return new Promise((resolve, reject) => {
     https
       .get(url, (res) => {
         if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-          fetchICS(res.headers.location).then(resolve, reject);
+          if (redirectsLeft <= 0) {
+            reject(new Error('Too many redirects fetching that calendar.'));
+            return;
+          }
+          fetchICS(res.headers.location, redirectsLeft - 1).then(resolve, reject);
+          return;
+        }
+        if (res.statusCode && res.statusCode >= 400) {
+          res.resume(); // drain so the socket can be reused/closed cleanly
+          reject(new Error(`That calendar returned an error (HTTP ${res.statusCode}) - check the URL is right and still shared.`));
           return;
         }
         let data = '';
         res.on('data', (chunk) => (data += chunk));
-        res.on('end', () => resolve(data));
+        res.on('end', () => resolve({ body: data, contentType: res.headers['content-type'] || '' }));
       })
-      .on('error', reject);
+      .on('error', (err) => reject(new Error(`Could not reach that calendar (${err.message}).`)));
   });
 }
 
+/** A light heuristic, not an enforced enum - just picks a nicer default label than "event" when a title is obviously an assignment. */
 function classifyEventType(summary = '') {
   const s = summary.toLowerCase();
   if (/(exam|test|midterm|final)/.test(s)) return 'exam';
   if (/(project|essay|paper)/.test(s)) return 'project';
-  return 'homework';
+  if (/(homework|hw|assignment|due)/.test(s)) return 'homework';
+  return 'event';
 }
 
-async function syncPowerSchoolICS(icsUrl) {
-  const raw = await fetchICS(icsUrl);
-  const jcalData = ICAL.parse(raw);
-  const comp = new ICAL.Component(jcalData);
-  const vevents = comp.getAllSubcomponents('vevent');
+/**
+ * Fetches and parses one ICS feed into full calendar-event objects (not yet
+ * tied to any particular source/table). A URL that isn't publicly shared
+ * (or was pasted wrong) commonly returns an HTML sign-in/error page instead
+ * of calendar data - ical.js throws a confusing internal error deep in its
+ * parser when handed that, so we check the shape of the response first and
+ * fail with a clear message before ever calling into ical.js.
+ */
+async function fetchIcsEvents(icsUrl) {
+  let body, contentType;
+  try {
+    ({ body, contentType } = await fetchICS(icsUrl));
+  } catch (e) {
+    throw e instanceof Error ? e : new Error('Could not reach that calendar.');
+  }
 
-  return vevents.map((ve) => {
-    const event = new ICAL.Event(ve);
-    return {
-      title: event.summary,
-      due_at: event.startDate.toJSDate().toISOString(),
-      type: classifyEventType(event.summary),
-      source: 'powerschool',
-      external_uid: event.uid
-    };
-  });
+  const looksLikeIcs = body.trimStart().slice(0, 15).toUpperCase().startsWith('BEGIN:VCALENDAR');
+  const looksLikeHtml = /^\s*<(!doctype|html)/i.test(body);
+  if (!looksLikeIcs || looksLikeHtml || /text\/html/i.test(contentType)) {
+    throw new Error("This calendar didn't return valid data - it may not be publicly shared, or the URL may be wrong.");
+  }
+
+  let comp, vevents;
+  try {
+    const jcalData = ICAL.parse(body);
+    comp = new ICAL.Component(jcalData);
+    vevents = comp.getAllSubcomponents('vevent');
+  } catch {
+    throw new Error("This calendar's data couldn't be read - it may be corrupted or in an unsupported format.");
+  }
+
+  const events = [];
+  for (const ve of vevents) {
+    try {
+      const event = new ICAL.Event(ve);
+      if (!event.startDate) continue; // a malformed single event shouldn't sink the whole feed
+      const isAllDay = Boolean(event.startDate.isDate);
+      const end = event.endDate || event.startDate;
+      events.push({
+        title: event.summary || '(untitled event)',
+        start_at: event.startDate.toJSDate().toISOString(),
+        end_at: end.toJSDate().toISOString(),
+        allDay: isAllDay,
+        type: classifyEventType(event.summary),
+        external_uid: event.uid
+      });
+    } catch {
+      // Skip just this one malformed VEVENT rather than failing the whole sync.
+    }
+  }
+  return events;
 }
+
 
 /**
  * ---- Google Calendar 2-way sync ----
@@ -62,11 +110,14 @@ async function syncPowerSchoolICS(icsUrl) {
  * account through the same consent screen setup.
  */
 
-// Calendar *and* Classroom scopes are requested together so a single
-// consent flow covers both features for whichever account the student
-// connects - most students only have Classroom on their school account,
-// but nothing stops them granting it on either.
-const OAUTH_SCOPES = [
+// Calendar *and* Classroom scopes are requested together by default so a
+// single consent flow covers both features for whichever account the
+// student connects. Some school Workspace admins restrict which OAuth
+// scopes an unverified/internal app can request per-domain (often
+// Classroom specifically, since it touches student data) without
+// restricting Calendar - so a narrower Calendar-only scope set is also
+// available as a fallback when the bundled request gets blocked outright.
+const OAUTH_SCOPES_FULL = [
   'https://www.googleapis.com/auth/calendar',
   'https://www.googleapis.com/auth/classroom.courses.readonly',
   'https://www.googleapis.com/auth/classroom.coursework.me.readonly',
@@ -74,15 +125,17 @@ const OAUTH_SCOPES = [
   'https://www.googleapis.com/auth/userinfo.email'
 ];
 
+const OAUTH_SCOPES_CALENDAR_ONLY = ['https://www.googleapis.com/auth/calendar', 'https://www.googleapis.com/auth/userinfo.email'];
+
 function buildOAuthClient(clientId, clientSecret, redirectUri) {
   return new google.auth.OAuth2(clientId, clientSecret, redirectUri);
 }
 
-function getAuthUrl(oAuth2Client) {
+function getAuthUrl(oAuth2Client, scopes = OAUTH_SCOPES_FULL) {
   return oAuth2Client.generateAuthUrl({
     access_type: 'offline',
     prompt: 'consent', // forces a refresh_token on every connect, even for a Google account connected before
-    scope: OAUTH_SCOPES
+    scope: scopes
   });
 }
 
@@ -169,7 +222,7 @@ async function createEvent(oAuth2Client, calendarId, { title, start, end, descri
 }
 
 module.exports = {
-  syncPowerSchoolICS,
+  fetchIcsEvents,
   buildOAuthClient,
   getAuthUrl,
   getAccountEmail,
@@ -178,5 +231,6 @@ module.exports = {
   listCalendars,
   getEventsForCalendar,
   createEvent,
-  OAUTH_SCOPES
+  OAUTH_SCOPES_FULL,
+  OAUTH_SCOPES_CALENDAR_ONLY
 };

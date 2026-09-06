@@ -1,9 +1,9 @@
 {
   "name": "student-os",
   "version": "0.1.0",
-  "description": "A lightweight, budget-friendly Student Operating System desktop app.",
+  "description": "A local-first desktop app for high school - notes, calendar, schedule, and AI study tools, all in one place.",
   "main": "electron/main.js",
-  "author": "Student OS",
+  "author": "Risan Shah",
   "license": "MIT",
   "private": true,
   "scripts": {

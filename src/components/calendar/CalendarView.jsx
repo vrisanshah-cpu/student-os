@@ -19,7 +19,7 @@ import { routineCategoryColor, ROUTINE_LAYER_COLOR } from '../../lib/routineColo
 
 const RANGE_START_HOUR = 6;
 const RANGE_END_HOUR = 23;
-const PX_PER_HOUR = 56;
+const PX_PER_HOUR = 72;
 const RANGE_START_MIN = RANGE_START_HOUR * 60;
 const RANGE_END_MIN = RANGE_END_HOUR * 60;
 const TOTAL_HEIGHT = ((RANGE_END_MIN - RANGE_START_MIN) / 60) * PX_PER_HOUR;
@@ -72,13 +72,15 @@ export default function CalendarView() {
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const [googleEvents, deadlines, plannerItems, calendarRows, bellPeriods, routineBlocks] = await Promise.all([
+      const [googleEvents, deadlines, plannerItems, calendarRows, bellPeriods, routineBlocks, icsSources, todayDayCode] = await Promise.all([
         api.getCalendarEvents(rangeStart.toISOString(), rangeEnd.toISOString()).catch(() => []),
         api.getUpcomingDeadlines().catch(() => []),
         api.getPlannerItemsRange(rangeStart.toISOString(), rangeEnd.toISOString()).catch(() => []),
         api.googleGetCalendarSettings().catch(() => []),
         api.getBellPeriods().catch(() => []),
-        api.getRoutineBlocks().catch(() => [])
+        api.getRoutineBlocks().catch(() => []),
+        api.icsListSources().catch(() => []),
+        api.getTodayDayCode().catch(() => null)
       ]);
 
       const unified = [];
@@ -101,16 +103,22 @@ export default function CalendarView() {
         const due = new Date(d.due_at);
         if (due < rangeStart || due > rangeEnd) continue;
         const isClassroom = d.source === 'classroom';
+        const isIcs = d.source === 'ics' && d.ics_source_id;
+        // Anything with a real end_at (a full ICS calendar event, or a
+        // manually-entered multi-day span like a school break) renders as an
+        // actual block; a plain homework-style deadline with no end stays a
+        // zero-duration point.
+        const hasRange = Boolean(d.end_at) && new Date(d.end_at) > due;
         unified.push({
           id: `deadline-${d.id}`,
           title: d.title,
           start: due,
-          end: due,
+          end: hasRange ? new Date(d.end_at) : due,
           allDay: false,
-          point: true,
-          color: isClassroom ? CLASSROOM_COLOR : d.class_color || MANUAL_COLOR,
-          chipKey: isClassroom ? 'classroom' : 'manual',
-          chipLabel: isClassroom ? 'Classroom' : 'Manual',
+          point: !hasRange,
+          color: isClassroom ? CLASSROOM_COLOR : isIcs ? d.ics_source_color || MANUAL_COLOR : d.class_color || MANUAL_COLOR,
+          chipKey: isClassroom ? 'classroom' : isIcs ? `ics:${d.ics_source_id}` : 'manual',
+          chipLabel: isClassroom ? 'Classroom' : isIcs ? d.ics_source_label || 'Calendar' : 'Manual',
           detail: d.type
         });
       }
@@ -129,10 +137,18 @@ export default function CalendarView() {
         });
       }
 
-      // Class schedule (bell_periods, day_type='both') - projected onto every
-      // weekday in the visible range, honoring the same `weekdays` restriction
-      // db:getTodaySchedule uses (e.g. a period that only meets on Mondays).
+      // Class schedule (bell_periods). Two kinds of rows:
+      // - day_type='both' (Advisory, Lunch): project onto every weekday in
+      //   range, honoring `weekdays` the same way db:getTodaySchedule does.
+      // - day_type '1'..'8' (the actual rotating classes): which letter
+      //   falls on which calendar date isn't known ahead of time - the app
+      //   only tracks *today's* letter (set on the Dashboard each morning),
+      //   so these only get projected onto whichever date that currently is,
+      //   not guessed for other days in a week/month view.
       const everydayPeriods = bellPeriods.filter((p) => p.day_type === 'both');
+      const rotatingPeriods = bellPeriods.filter((p) => p.day_type !== 'both');
+      const knownRotationDay = todayDayCode?.isToday && todayDayCode.code ? new Date() : null;
+
       for (const day of eachDayOfInterval({ start: rangeStart, end: rangeEnd })) {
         const weekday = day.getDay();
         if (weekday === 0 || weekday === 6) continue; // school periods are weekdays only
@@ -149,6 +165,22 @@ export default function CalendarView() {
             chipLabel: 'Classes',
             detail: p.room ? `Rm ${p.room}` : p.teacher
           });
+        }
+        if (knownRotationDay && isSameDay(day, knownRotationDay)) {
+          for (const p of rotatingPeriods) {
+            if (p.day_type !== todayDayCode.code) continue;
+            unified.push({
+              id: `class-${p.id}-${day.toDateString()}`,
+              title: p.name,
+              start: atTime(day, p.start_time),
+              end: atTime(day, p.end_time),
+              allDay: false,
+              color: CLASS_SCHEDULE_COLOR,
+              chipKey: 'class-schedule',
+              chipLabel: 'Classes',
+              detail: p.room ? `Rm ${p.room}` : p.teacher
+            });
+          }
         }
       }
 
@@ -192,6 +224,9 @@ export default function CalendarView() {
           color: colors[0] || '#5B8CFF'
         })),
         { key: 'classroom', label: 'Classroom', color: CLASSROOM_COLOR },
+        ...icsSources
+          .filter((s) => s.enabled)
+          .map((s) => ({ key: `ics:${s.id}`, label: s.label, color: s.color || MANUAL_COLOR })),
         { key: 'routine', label: 'Routine', color: ROUTINE_LAYER_COLOR },
         { key: 'manual', label: 'Manual', color: MANUAL_COLOR }
       ];
@@ -421,7 +456,9 @@ function toBlockStyle(start, end) {
   const startMin = Math.max(minutesOfDay(start), RANGE_START_MIN);
   const endMin = Math.min(Math.max(minutesOfDay(end), startMin + 15), RANGE_END_MIN);
   const top = ((startMin - RANGE_START_MIN) / 60) * PX_PER_HOUR;
-  const height = Math.max(((endMin - startMin) / 60) * PX_PER_HOUR, 18);
+  // 24px is enough for one line of text; a block gets a second (time-range)
+  // line only if toBlockStyle's caller decides there's room - see showTime below.
+  const height = Math.max(((endMin - startMin) / 60) * PX_PER_HOUR, 24);
   return { top, height };
 }
 
@@ -518,10 +555,14 @@ function DayColumn({ day, events, onAddAt, narrow }) {
         const { top, height } = toBlockStyle(e.start, e.end);
         const cols = e._cols || 1;
         const widthPct = 100 / cols;
+        // A title + time-range line each need ~16px; below ~40px tall there's
+        // only room for one, so the time range drops rather than clipping and
+        // visually bleeding into whatever's positioned right after it.
+        const showTime = !narrow && height >= 40;
         return (
           <div
             key={e.id}
-            className="absolute z-10 rounded-md px-2 py-1 overflow-hidden"
+            className="absolute z-10 rounded-md px-2 py-1 overflow-hidden flex flex-col justify-center"
             style={{
               top,
               height,
@@ -530,13 +571,13 @@ function DayColumn({ day, events, onAddAt, narrow }) {
               background: `${e.color}22`,
               border: `1px solid ${e.color}66`
             }}
-            title={e.title}
+            title={showTime ? e.title : `${e.title} · ${format(e.start, 'h:mm a')}–${format(e.end, 'h:mm a')}`}
           >
-            <p className={`font-medium truncate ${narrow ? 'text-xs' : 'text-xs'}`} style={{ color: e.color }}>
+            <p className="font-medium truncate text-xs leading-tight" style={{ color: e.color }}>
               {e.title}
             </p>
-            {!narrow && (
-              <p className="text-xs text-base-muted truncate">
+            {showTime && (
+              <p className="text-xs text-base-muted truncate leading-tight">
                 {format(e.start, 'h:mm a')}–{format(e.end, 'h:mm a')}
               </p>
             )}

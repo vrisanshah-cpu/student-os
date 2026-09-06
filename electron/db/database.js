@@ -22,8 +22,10 @@ function initDatabase() {
   db.exec(schema);
 
   runMigrations(db);
-  seedSampleClassScheduleIfNeeded(db);
-  seedSampleDailyRoutineIfNeeded(db);
+  // No default schedule, routine, or school-year calendar ships with the
+  // base app - every student's schedule is different. Set yours up in
+  // Settings (Bell schedule, Daily routine) once you're in; both support
+  // full add/edit/delete, so there's nothing to "unlearn" from a preset.
 
   return db;
 }
@@ -72,6 +74,24 @@ function runMigrations(db) {
   const deadlineColumns = db.prepare("PRAGMA table_info(deadlines)").all().map((c) => c.name);
   if (!deadlineColumns.includes('notified_12h')) {
     db.exec('ALTER TABLE deadlines ADD COLUMN notified_12h INTEGER DEFAULT 0');
+  }
+
+  // Several sync paths (PowerSchool ICS, Classroom, and now multi-source ICS)
+  // upsert on `ON CONFLICT(external_uid) DO UPDATE`, which SQLite only
+  // accepts if external_uid is actually backed by a unique index - it never
+  // was, so any real re-sync would have thrown at the SQL level instead of
+  // updating in place. De-dupe defensively (keep the lowest id) in case
+  // anything slipped through before this existed, then add the index.
+  const dedupeIndex = db
+    .prepare("SELECT name FROM sqlite_master WHERE type='index' AND name='idx_deadlines_external_uid'")
+    .get();
+  if (!dedupeIndex) {
+    db.exec(`
+      DELETE FROM deadlines
+      WHERE external_uid IS NOT NULL
+        AND id NOT IN (SELECT MIN(id) FROM deadlines WHERE external_uid IS NOT NULL GROUP BY external_uid);
+      CREATE UNIQUE INDEX idx_deadlines_external_uid ON deadlines(external_uid) WHERE external_uid IS NOT NULL;
+    `);
   }
 
   const canvasTable = db
@@ -123,6 +143,16 @@ function runMigrations(db) {
     if (legacy?.value) {
       db.prepare(`INSERT INTO google_accounts (label, email, tokens) VALUES ('Personal', NULL, ?)`).run(legacy.value);
     }
+  }
+
+  const googleAccountColumns = db.prepare('PRAGMA table_info(google_accounts)').all().map((c) => c.name);
+  if (!googleAccountColumns.includes('scope')) {
+    // 'full' (Calendar + Classroom, the default) | 'calendar_only' - some
+    // school Workspace admins block the Classroom scopes for unverified
+    // apps without blocking Calendar, so a narrower connect option exists
+    // as a fallback. Existing accounts predate this column and were all
+    // connected with the full scope set.
+    db.exec("ALTER TABLE google_accounts ADD COLUMN scope TEXT DEFAULT 'full'");
   }
 
   const googleCalendarsTable = db
@@ -201,6 +231,57 @@ function runMigrations(db) {
       CREATE INDEX idx_routine_blocks_day ON routine_blocks(day_type);
     `);
   }
+
+  // ---- Multiple named ICS subscriptions (per-class calendars, school-wide
+  // events, a rotating day-schedule feed, etc) - generalizes what used to be
+  // a single "powerschool_ics_url" setting into a list, each with its own
+  // color so it can show up on the unified Calendar as its own layer,
+  // matching how connected Google calendars already work. ----
+  const icsSourcesTable = db
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='ics_sources'")
+    .get();
+  if (!icsSourcesTable) {
+    db.exec(`
+      CREATE TABLE ics_sources (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        label TEXT NOT NULL,
+        url TEXT NOT NULL,
+        color TEXT DEFAULT '#5B8CFF',
+        enabled INTEGER DEFAULT 1,
+        last_synced_at TEXT,
+        last_sync_status TEXT, -- 'ok' | 'error' | null (never synced)
+        last_sync_error TEXT,
+        created_at TEXT DEFAULT (datetime('now'))
+      );
+    `);
+
+    // Carry forward anyone's existing single ICS URL as their first source,
+    // rather than silently dropping it - it'll keep syncing exactly as
+    // before, just presented as a one-item list they can now rename or add to.
+    const legacyUrl = db.prepare("SELECT value FROM settings WHERE key = 'powerschool_ics_url'").get()?.value;
+    if (legacyUrl) {
+      db.prepare(`INSERT INTO ics_sources (label, url, color) VALUES ('My calendar', ?, '#5B8CFF')`).run(legacyUrl);
+    }
+  }
+
+  const icsSourceColumns = db.prepare('PRAGMA table_info(ics_sources)').all().map((c) => c.name);
+  if (!icsSourceColumns.includes('last_sync_status')) {
+    db.exec("ALTER TABLE ics_sources ADD COLUMN last_sync_status TEXT");
+  }
+  if (!icsSourceColumns.includes('last_sync_error')) {
+    db.exec('ALTER TABLE ics_sources ADD COLUMN last_sync_error TEXT');
+  }
+
+  const deadlineIcsColumns = db.prepare('PRAGMA table_info(deadlines)').all().map((c) => c.name);
+  if (!deadlineIcsColumns.includes('ics_source_id')) {
+    db.exec('ALTER TABLE deadlines ADD COLUMN ics_source_id INTEGER REFERENCES ics_sources(id) ON DELETE CASCADE');
+  }
+  if (!deadlineIcsColumns.includes('end_at')) {
+    // Nullable - most deadlines are a single due instant, but full ICS
+    // calendar events (school-wide events, day-schedule entries) have a
+    // real end time worth keeping for the Calendar view.
+    db.exec('ALTER TABLE deadlines ADD COLUMN end_at TEXT');
+  }
 }
 
 function getDb() {
@@ -210,106 +291,3 @@ function getDb() {
 
 module.exports = { initDatabase, getDb };
 
-// ---------- First-run sample data ----------
-// A fresh install starts with a small, clearly-fictional example class
-// schedule and daily routine so the Calendar view has something to show
-// before a real user fills in their own via Settings -> Class schedule /
-// Daily routine. Guarded by settings flags so each only ever runs once,
-// and only inserts - a user is always free to delete every row of it.
-
-const CLASS_COLORS = ['#5B8CFF', '#4FD1A5', '#F2B84B', '#E56B6B', '#8890A6', '#7C4DBE', '#2F5FD1', '#1F8A5F'];
-
-const SAMPLE_PERIODS = [
-  { n: 1, name: 'Algebra II', teacher: 'Ms. Rivera', room: '204', start: '08:00', end: '08:50' },
-  { n: 2, name: 'English Literature', teacher: 'Mr. Chen', room: '118', start: '08:55', end: '09:45' },
-  { n: 3, name: 'Chemistry', teacher: 'Dr. Patel', room: 'SCI-3', start: '09:50', end: '10:40' },
-  { n: 4, name: 'World History', teacher: 'Mrs. Alvarez', room: '210', start: '10:45', end: '11:35' },
-  { n: 5, name: 'Study Hall', teacher: '', room: '', start: '11:40', end: '12:20' },
-  { n: 6, name: 'Spanish II', teacher: 'Sr. Mendoza', room: '112', start: '13:00', end: '13:50' },
-  { n: 7, name: 'Physical Education', teacher: 'Coach Diaz', room: 'GYM', start: '13:55', end: '14:45' },
-  { n: 8, name: 'Advisory', teacher: 'Ms. Rivera', room: '204', start: '14:50', end: '15:10', kind: 'advisory' }
-];
-
-function seedSampleClassScheduleIfNeeded(db) {
-  const already = db.prepare("SELECT value FROM settings WHERE key = 'sample_schedule_seeded_v1'").get();
-  if (already) return;
-
-  const tx = db.transaction(() => {
-    const insertPeriod = db.prepare(
-      `INSERT INTO bell_periods (day_type, name, start_time, end_time, class_id, room, teacher, weekdays, kind, sort_order)
-       VALUES ('both', ?, ?, ?, ?, ?, ?, '', ?, ?)`
-    );
-
-    SAMPLE_PERIODS.forEach((p, i) => {
-      let cls = db.prepare('SELECT id FROM classes WHERE name = ?').get(p.name);
-      if (!cls) {
-        const color = CLASS_COLORS[i % CLASS_COLORS.length];
-        const info = db
-          .prepare('INSERT INTO classes (name, color, powerschool_period) VALUES (?, ?, ?)')
-          .run(p.name, color, `Period ${p.n}`);
-        cls = { id: info.lastInsertRowid };
-      }
-      insertPeriod.run(p.name, p.start, p.end, cls.id, p.room || '', p.teacher || '', p.kind || 'class', i);
-    });
-
-    db.prepare(`INSERT INTO settings (key, value) VALUES ('sample_schedule_seeded_v1', '1')`).run();
-  });
-
-  tx();
-}
-
-// A simple example personal routine - one weekday template plus a weekend
-// template, editable per day of week in Settings -> Daily routine.
-const SAMPLE_WEEKDAY_ROUTINE = [
-  { title: 'Wake up, get ready', category: 'morning', start: '06:45', end: '07:15' },
-  { title: 'Breakfast', category: 'morning', start: '07:15', end: '07:40' },
-  { title: 'Commute to school', category: 'morning', start: '07:40', end: '08:00' },
-  { title: 'Commute home', category: 'afternoon', start: '15:10', end: '15:30' },
-  { title: 'Snack / decompress', category: 'afternoon', start: '15:30', end: '15:45' },
-  { title: 'Study block — homework / projects', category: 'study', start: '15:45', end: '17:15' },
-  { title: 'Free time / extracurriculars', category: 'flex', start: '17:15', end: '18:30' },
-  { title: 'Dinner', category: 'afternoon', start: '18:30', end: '19:00' },
-  { title: 'Reading / personal project', category: 'interest', start: '19:00', end: '20:00' },
-  { title: 'Wind down', category: 'winddown', start: '20:00', end: '21:00' },
-  { title: 'Sleep', category: 'sleep', start: '21:30', end: '21:35' }
-];
-
-const SAMPLE_WEEKEND_ROUTINE = [
-  { title: 'Wake up', category: 'morning', start: '08:30', end: '09:00' },
-  { title: 'Breakfast', category: 'morning', start: '09:00', end: '09:30' },
-  { title: 'Exercise / outdoors', category: 'afternoon', start: '09:30', end: '10:30' },
-  { title: 'Study block — catch up / test prep', category: 'study', start: '11:00', end: '12:30' },
-  { title: 'Lunch', category: 'afternoon', start: '12:30', end: '13:15' },
-  { title: 'Personal project / hobby time', category: 'interest', start: '13:15', end: '15:00' },
-  { title: 'Free time', category: 'flex', start: '15:00', end: '18:00' },
-  { title: 'Dinner', category: 'afternoon', start: '18:00', end: '18:45' },
-  { title: 'Weekly review + plan next week', category: 'winddown', start: '19:00', end: '19:30' },
-  { title: 'Wind down', category: 'winddown', start: '21:00', end: '22:00' },
-  { title: 'Sleep', category: 'sleep', start: '22:00', end: '22:05' }
-];
-
-const SAMPLE_DAILY_ROUTINE = {
-  monday: SAMPLE_WEEKDAY_ROUTINE,
-  tuesday: SAMPLE_WEEKDAY_ROUTINE,
-  wednesday: SAMPLE_WEEKDAY_ROUTINE,
-  thursday: SAMPLE_WEEKDAY_ROUTINE,
-  friday: SAMPLE_WEEKDAY_ROUTINE,
-  saturday: SAMPLE_WEEKEND_ROUTINE,
-  sunday: SAMPLE_WEEKEND_ROUTINE
-};
-
-function seedSampleDailyRoutineIfNeeded(db) {
-  const already = db.prepare("SELECT value FROM settings WHERE key = 'sample_routine_seeded_v1'").get();
-  if (already) return;
-
-  const insert = db.prepare(
-    `INSERT INTO routine_blocks (day_type, title, category, start_time, end_time, sort_order) VALUES (?, ?, ?, ?, ?, ?)`
-  );
-  const tx = db.transaction(() => {
-    for (const [dayType, blocks] of Object.entries(SAMPLE_DAILY_ROUTINE)) {
-      blocks.forEach((b, i) => insert.run(dayType, b.title, b.category, b.start, b.end, i));
-    }
-    db.prepare(`INSERT INTO settings (key, value) VALUES ('sample_routine_seeded_v1', '1')`).run();
-  });
-  tx();
-}

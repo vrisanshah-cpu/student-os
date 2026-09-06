@@ -15,7 +15,7 @@ const fs = require('fs');
 const http = require('http');
 const { initDatabase, getDb } = require('./db/database');
 const {
-  syncPowerSchoolICS,
+  fetchIcsEvents,
   buildOAuthClient,
   getAuthUrl,
   getAccountEmail,
@@ -23,11 +23,26 @@ const {
   pushStudyBlockToCalendar,
   listCalendars,
   getEventsForCalendar,
-  createEvent
+  createEvent,
+  OAUTH_SCOPES_FULL,
+  OAUTH_SCOPES_CALENDAR_ONLY
 } = require('./services/calendarSync');
 const { listCourses, listCourseWork } = require('./services/classroomSync');
 const { scheduleStudyBlocks } = require('./services/studyScheduler');
 const { generateStudyGuide, generatePracticeExam, testApiKey, generateAutocomplete } = require('./services/geminiEngine');
+
+// Electron's default userData folder name comes from package.json's
+// top-level "name" in dev (electron .) but can resolve differently once
+// packaged, since electron-builder's productName ("Student OS", set under
+// "build" in package.json) isn't guaranteed to line up with that "name"
+// field ("student-os") inside the packaged app.asar. Rather than rely on
+// that resolution being consistent across dev and packaged builds, pin it
+// explicitly so both always use the exact same userData path - the one
+// already in use, with real accounts/credentials/schedule/routine in it.
+// Must run before app.getPath() is ever called (ideally before 'ready').
+app.setName('student-os');
+console.log('[startup] app.getName():', app.getName());
+console.log('[startup] userData path:', app.getPath('userData'));
 
 const isDev = process.env.NODE_ENV === 'development';
 
@@ -125,8 +140,10 @@ ipcMain.handle('db:getDashboardData', () => {
 
   const upcomingDeadlines = db
     .prepare(
-      `SELECT d.*, c.name as class_name, c.color as class_color
-       FROM deadlines d LEFT JOIN classes c ON c.id = d.class_id
+      `SELECT d.*, c.name as class_name, c.color as class_color, isrc.label as ics_source_label, isrc.color as ics_source_color
+       FROM deadlines d
+       LEFT JOIN classes c ON c.id = d.class_id
+       LEFT JOIN ics_sources isrc ON isrc.id = d.ics_source_id
        WHERE d.completed = 0 AND d.due_at >= datetime('now')
        ORDER BY d.due_at ASC LIMIT 10`
     )
@@ -267,8 +284,10 @@ ipcMain.handle('db:createDeadline', (_e, deadline) =>
 ipcMain.handle('db:getUpcomingDeadlines', () =>
   db
     .prepare(
-      `SELECT d.*, c.name as class_name, c.color as class_color
-       FROM deadlines d LEFT JOIN classes c ON c.id = d.class_id
+      `SELECT d.*, c.name as class_name, c.color as class_color, isrc.label as ics_source_label, isrc.color as ics_source_color
+       FROM deadlines d
+       LEFT JOIN classes c ON c.id = d.class_id
+       LEFT JOIN ics_sources isrc ON isrc.id = d.ics_source_id
        WHERE d.completed = 0 ORDER BY d.due_at ASC`
     )
     .all()
@@ -745,18 +764,92 @@ ipcMain.handle('file:saveImageData', (_e, { dataUrl, extension }) => {
   return pathToFileURL(destPath).href;
 });
 
-// ---------- IPC: Sync ----------
+// ---------- IPC: ICS calendar sources ----------
+// Any number of named ICS subscriptions (per-class calendars, school-wide
+// events, a rotating day-schedule feed, PowerSchool, whatever) - each syncs
+// independently into `deadlines`, tagged with its own source row so the
+// Calendar view can color/label/filter it separately, the same way a
+// connected Google calendar does.
 
-ipcMain.handle('sync:powerschool', async (_e, icsUrl) => {
-  const events = await syncPowerSchoolICS(icsUrl);
-  const insert = db.prepare(
-    `INSERT INTO deadlines (title, type, due_at, source, external_uid)
-     VALUES (@title, @type, @due_at, @source, @external_uid)
-     ON CONFLICT(external_uid) DO UPDATE SET due_at = excluded.due_at, title = excluded.title`
+ipcMain.handle('ics:listSources', () => db.prepare('SELECT * FROM ics_sources ORDER BY id').all());
+
+ipcMain.handle('ics:createSource', (_e, { label, url, color }) => {
+  const info = db
+    .prepare('INSERT INTO ics_sources (label, url, color) VALUES (?, ?, ?)')
+    .run(label, url, color || '#5B8CFF');
+  return db.prepare('SELECT * FROM ics_sources WHERE id = ?').get(info.lastInsertRowid);
+});
+
+ipcMain.handle('ics:updateSource', (_e, { id, label, url, color, enabled }) => {
+  db.prepare('UPDATE ics_sources SET label = ?, url = ?, color = ?, enabled = ? WHERE id = ?').run(
+    label,
+    url,
+    color || '#5B8CFF',
+    enabled ? 1 : 0,
+    id
   );
-  const tx = db.transaction((rows) => rows.forEach((r) => insert.run(r)));
-  tx(events);
-  return { imported: events.length };
+  return db.prepare('SELECT * FROM ics_sources WHERE id = ?').get(id);
+});
+
+ipcMain.handle('ics:deleteSource', (_e, id) => {
+  db.prepare('DELETE FROM ics_sources WHERE id = ?').run(id);
+  return true;
+});
+
+// Never throws - a bad URL (most often an HTML sign-in/error page instead of
+// real ICS data, e.g. a calendar that isn't actually publicly shared) is a
+// routine, expected failure mode here, not a crash. The result carries
+// ok/error instead, and the same failure is persisted onto the source row so
+// Settings can show it inline next to that calendar rather than a one-off
+// toast that disappears - and so one bad source never stops the others
+// (ics:syncAll below) from syncing.
+async function syncIcsSource(sourceId) {
+  const source = db.prepare('SELECT * FROM ics_sources WHERE id = ?').get(sourceId);
+  if (!source) return { imported: 0, ok: false, error: 'That calendar source no longer exists.' };
+
+  try {
+    const events = await fetchIcsEvents(source.url);
+    const insert = db.prepare(
+      `INSERT INTO deadlines (title, type, due_at, end_at, source, external_uid, ics_source_id)
+       VALUES (@title, @type, @due_at, @end_at, 'ics', @external_uid, @ics_source_id)
+       ON CONFLICT(external_uid) DO UPDATE SET due_at = excluded.due_at, end_at = excluded.end_at, title = excluded.title`
+    );
+    const tx = db.transaction((rows) => rows.forEach((r) => insert.run(r)));
+    tx(
+      events.map((e) => ({
+        title: e.title,
+        type: e.type,
+        due_at: e.start_at,
+        end_at: e.end_at,
+        // Namespaced by source so the same ICS UID from two different feeds
+        // (unlikely, but free) can never collide with each other.
+        external_uid: `ics:${sourceId}:${e.external_uid}`,
+        ics_source_id: sourceId
+      }))
+    );
+    db.prepare(
+      "UPDATE ics_sources SET last_synced_at = datetime('now'), last_sync_status = 'ok', last_sync_error = NULL WHERE id = ?"
+    ).run(sourceId);
+    return { imported: events.length, ok: true };
+  } catch (e) {
+    const message = e?.message || 'Sync failed.';
+    db.prepare("UPDATE ics_sources SET last_sync_status = 'error', last_sync_error = ? WHERE id = ?").run(message, sourceId);
+    return { imported: 0, ok: false, error: message };
+  }
+}
+
+ipcMain.handle('ics:syncSource', (_e, id) => syncIcsSource(id));
+
+ipcMain.handle('ics:syncAll', async () => {
+  const sources = db.prepare('SELECT id FROM ics_sources WHERE enabled = 1').all();
+  let imported = 0;
+  const errors = [];
+  for (const s of sources) {
+    const result = await syncIcsSource(s.id);
+    imported += result.imported;
+    if (!result.ok) errors.push({ id: s.id, message: result.error });
+  }
+  return { imported, errors };
 });
 
 // ---------- Google OAuth (multi-account, loopback redirect) ----------
@@ -829,10 +922,11 @@ function getDefaultPushCalendar() {
 }
 
 /** Runs the whole connect flow: loopback server -> consent screen -> code exchange -> save account. */
-async function startGoogleAuth(label) {
+async function startGoogleAuth(label, scopeMode = 'full') {
   if (authInProgress) throw new Error('Already connecting a Google account - finish or cancel that first.');
   authInProgress = true;
   try {
+    const scopes = scopeMode === 'calendar_only' ? OAUTH_SCOPES_CALENDAR_ONLY : OAUTH_SCOPES_FULL;
     const server = http.createServer();
     const codePromise = new Promise((resolveCode, rejectCode) => {
       server.on('request', (req, res) => {
@@ -866,7 +960,11 @@ async function startGoogleAuth(label) {
     const redirectUri = `http://127.0.0.1:${port}`;
 
     const client = buildClientFromSavedSettings(redirectUri);
-    const authUrl = getAuthUrl(client);
+    const authUrl = getAuthUrl(client, scopes);
+    // Sent to the renderer immediately (not just auto-launched) so the user
+    // can copy it into whichever browser/profile they actually want signed
+    // in with, rather than being stuck with whatever the OS default opens.
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('google:authUrl', { authUrl });
     await shell.openExternal(authUrl);
 
     let code;
@@ -890,8 +988,8 @@ async function startGoogleAuth(label) {
     }
 
     const info = db
-      .prepare('INSERT INTO google_accounts (label, email, tokens) VALUES (?, ?, ?)')
-      .run(label?.trim() || 'Google account', email, encryptTokens(tokens));
+      .prepare('INSERT INTO google_accounts (label, email, tokens, scope) VALUES (?, ?, ?, ?)')
+      .run(label?.trim() || 'Google account', email, encryptTokens(tokens), scopeMode);
     const accountId = info.lastInsertRowid;
     googleClients.set(accountId, client);
     client.on('tokens', (newTokens) => {
@@ -900,16 +998,18 @@ async function startGoogleAuth(label) {
       db.prepare('UPDATE google_accounts SET tokens = ? WHERE id = ?').run(encryptTokens(merged), accountId);
     });
 
-    return { id: accountId, label: label?.trim() || 'Google account', email };
+    return { id: accountId, label: label?.trim() || 'Google account', email, scope: scopeMode };
   } finally {
     authInProgress = false;
   }
 }
 
-ipcMain.handle('google:connect', (_e, { label }) => startGoogleAuth(label));
+ipcMain.handle('google:connect', (_e, { label, calendarOnly }) =>
+  startGoogleAuth(label, calendarOnly ? 'calendar_only' : 'full')
+);
 
 ipcMain.handle('google:listAccounts', () =>
-  db.prepare('SELECT id, label, email, created_at FROM google_accounts ORDER BY id').all()
+  db.prepare("SELECT id, label, email, scope, created_at FROM google_accounts ORDER BY id").all()
 );
 
 ipcMain.handle('google:removeAccount', (_e, id) => {

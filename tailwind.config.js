@@ -29,6 +29,12 @@ export default {
           rule: '#E4D9C3',
           ink: '#2B2620',
           muted: '#8C8270'
+        },
+        // The campus map's "holographic" accent - a distinct cyan, never
+        // used elsewhere, so that one screen reads as its own space.
+        holo: {
+          DEFAULT: '#2DE2E6',
+          dim: '#1B8A8D'
         }
       },
       fontFamily: {

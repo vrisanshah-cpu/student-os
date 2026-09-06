@@ -8,22 +8,6 @@ export default function TopBar() {
   const [mode, setMode] = useState('pomodoro'); // 'pomodoro' | 'stopwatch'
   const [prefs, setPrefs] = useState(null);
   const [showHomework, setShowHomework] = useState(false);
-  const [myTime, setMyTime] = useState('');
-
-  useEffect(() => {
-    function tick() {
-      setMyTime(
-        new Intl.DateTimeFormat('en-MY', {
-          timeZone: 'Asia/Kuala_Lumpur',
-          hour: 'numeric',
-          minute: '2-digit'
-        }).format(new Date())
-      );
-    }
-    tick();
-    const id = setInterval(tick, 15000);
-    return () => clearInterval(id);
-  }, []);
 
   useEffect(() => {
     (async () => {
@@ -53,10 +37,6 @@ export default function TopBar() {
       </div>
 
       <div className="flex items-center gap-2">
-        <span className="hidden sm:flex flex-col items-end leading-tight mr-1" title="Malaysia time">
-          <span className="text-xs text-base-muted font-mono">MYT</span>
-          <span className="text-xs font-mono text-base-text tabular-nums">{myTime}</span>
-        </span>
         <div className="flex items-center bg-base-card rounded-full p-1 border border-base-border">
           <button
             onClick={() => setMode('pomodoro')}

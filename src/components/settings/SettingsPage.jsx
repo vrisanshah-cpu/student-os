@@ -17,12 +17,25 @@ import {
   LayoutTemplate,
   Star,
   GraduationCap,
-  Sunrise
+  Sunrise,
+  Copy
 } from 'lucide-react';
 import api from '../../lib/api.js';
 import { ROUTINE_CATEGORIES, ROUTINE_DAYS } from '../../lib/routineColors.js';
 
+const ICS_COLORS = ['#5B8CFF', '#4FD1A5', '#F2B84B', '#E56B6B', '#7C4DBE', '#2F5FD1', '#1F8A5F', '#8890A6'];
+
 export default function SettingsPage() {
+  // GoogleAccountsSection, CalendarsSection, and ClassroomSection each own
+  // their own fetch-on-mount - which means connecting/removing an account in
+  // the first one left the other two silently stale until the whole page
+  // remounted (e.g. navigating away and back). This counter is a shared
+  // "something about the connected accounts changed" signal: bumping it is
+  // in each section's effect dependencies, so a connect/remove anywhere
+  // reliably triggers a re-fetch everywhere else on the page too.
+  const [googleAccountsVersion, setGoogleAccountsVersion] = useState(0);
+  const bumpGoogleAccounts = () => setGoogleAccountsVersion((v) => v + 1);
+
   return (
     <div className="flex-1 overflow-y-auto p-6">
       <div className="mb-6">
@@ -36,9 +49,9 @@ export default function SettingsPage() {
 
       <div className="grid grid-cols-1 xl:grid-cols-2 gap-5 max-w-4xl">
         <CalendarSyncSection />
-        <GoogleAccountsSection />
-        <CalendarsSection />
-        <ClassroomSection />
+        <GoogleAccountsSection onAccountsChanged={bumpGoogleAccounts} />
+        <CalendarsSection refreshKey={googleAccountsVersion} />
+        <ClassroomSection refreshKey={googleAccountsVersion} />
         <GeminiSection />
         <PomodoroSection />
         <BellScheduleSection />
@@ -52,64 +65,168 @@ export default function SettingsPage() {
 // ---------- Calendar sync (Google Calendar ICS feed) ----------
 
 function CalendarSyncSection() {
-  const [icsUrl, setIcsUrl] = useState('');
-  const [loaded, setLoaded] = useState(false);
-  const [saving, setSaving] = useState(false);
-  const [syncing, setSyncing] = useState(false);
+  const [sources, setSources] = useState([]);
+  const [syncingId, setSyncingId] = useState(null); // a source id, or 'all'
   const [status, setStatus] = useState(null); // { ok, message }
+  const [draft, setDraft] = useState({ label: '', url: '', color: ICS_COLORS[0] });
+
+  async function load() {
+    setSources(await api.icsListSources());
+  }
 
   useEffect(() => {
-    api.getSetting('powerschool_ics_url').then((v) => {
-      setIcsUrl(v || '');
-      setLoaded(true);
-    });
+    load();
   }, []);
 
-  async function handleSave() {
-    setSaving(true);
+  async function addSource() {
+    if (!draft.label.trim() || !draft.url.trim()) {
+      setStatus({ ok: false, message: 'Give the calendar a name and a URL.' });
+      return;
+    }
+    const created = await api.icsCreateSource(draft);
+    setDraft({ label: '', url: '', color: ICS_COLORS[sources.length % ICS_COLORS.length] });
+    await load();
+    setStatus(null);
+    // Sync it immediately so adding a source feels like it did something.
+    await syncOne(created.id);
+  }
+
+  async function removeSource(id) {
+    if (!confirm('Remove this calendar source? Events already synced from it stay in your deadlines list.')) return;
+    await api.icsDeleteSource(id);
+    await load();
+  }
+
+  async function toggleEnabled(source, enabled) {
+    await api.icsUpdateSource({ ...source, enabled });
+    await load();
+  }
+
+  async function setColor(source, color) {
+    await api.icsUpdateSource({ ...source, color });
+    await load();
+  }
+
+  async function renameSource(source, label) {
+    await api.icsUpdateSource({ ...source, label });
+  }
+
+  async function syncOne(id) {
+    setSyncingId(id);
+    setStatus(null);
     try {
-      await api.setSetting('powerschool_ics_url', icsUrl);
-      setStatus({ ok: true, message: 'Saved.' });
+      // ics:syncSource never throws for a bad/unreachable calendar - it
+      // persists the failure onto the source row instead (rendered inline
+      // below), so a single flaky calendar doesn't need a toast of its own.
+      await api.icsSyncSource(id);
+      await load();
+    } catch (e) {
+      // Only genuinely unexpected failures (e.g. the IPC call itself) land here.
+      setStatus({ ok: false, message: e?.message || 'Could not sync that calendar.' });
     } finally {
-      setSaving(false);
+      setSyncingId(null);
     }
   }
 
-  async function handleSyncNow() {
-    if (!icsUrl) {
-      setStatus({ ok: false, message: 'Add your calendar ICS URL first.' });
-      return;
-    }
-    setSyncing(true);
+  async function syncAll() {
+    setSyncingId('all');
     setStatus(null);
     try {
-      await api.setSetting('powerschool_ics_url', icsUrl);
-      const result = await api.syncPowerSchool(icsUrl);
-      setStatus({ ok: true, message: `Imported ${result.imported} events from your calendar.` });
-    } catch (e) {
-      setStatus({ ok: false, message: e?.message || 'Could not reach that URL.' });
+      const result = await api.icsSyncAll();
+      await load();
+      const failed = result.errors?.length || 0;
+      setStatus({
+        ok: failed === 0,
+        message: `Imported ${result.imported} event${result.imported === 1 ? '' : 's'}${
+          failed ? ` — ${failed} calendar${failed === 1 ? '' : 's'} failed to sync` : ''
+        }.`
+      });
     } finally {
-      setSyncing(false);
+      setSyncingId(null);
     }
   }
 
   return (
     <Section
       icon={<CalendarClock size={15} />}
-      title="Calendar sync"
-      description="Paste your Google Calendar's secret ICS address (Calendar → Settings and sharing → Integrate calendar → Secret address in iCal format). Events come in as deadlines - homework, exams, whatever's on it."
+      title="Calendar sync (ICS)"
+      description="Subscribe to any number of ICS calendar feeds - per-class calendars, school-wide events, a rotating day schedule, PowerSchool, whatever your school publishes. Each syncs independently into your deadlines, with its own color, so they show up separately on the unified Calendar."
     >
-      <Field
-        label="Calendar ICS URL"
-        placeholder="https://calendar.google.com/calendar/ical/…/private-…/basic.ics"
-        value={icsUrl}
-        onChange={setIcsUrl}
-        disabled={!loaded}
-      />
-      <div className="flex items-center gap-2 pt-1">
-        <PrimaryButton onClick={handleSave} loading={saving} label="Save" />
-        <SecondaryButton onClick={handleSyncNow} loading={syncing} icon={<RefreshCw size={13} />} label="Sync now" />
+      {sources.length > 0 && (
+        <ul className="space-y-2">
+          {sources.map((s) => (
+            <li key={s.id} className="space-y-1.5 px-3 py-2 rounded-lg bg-base-card border border-base-border">
+              <div className="flex items-center gap-2">
+                <input
+                  type="checkbox"
+                  checked={Boolean(s.enabled)}
+                  onChange={(e) => toggleEnabled(s, e.target.checked)}
+                  className="accent-accent shrink-0"
+                  title="Include on the unified Calendar"
+                />
+                <input
+                  type="color"
+                  value={s.color || '#5B8CFF'}
+                  onChange={(e) => setColor(s, e.target.value)}
+                  title="Calendar color"
+                  className="w-5 h-5 rounded border border-base-border bg-transparent shrink-0"
+                />
+                <input
+                  defaultValue={s.label}
+                  onBlur={(e) => renameSource(s, e.target.value)}
+                  className="flex-1 min-w-0 bg-transparent text-xs font-medium text-base-text focus:outline-none"
+                />
+                <button
+                  onClick={() => syncOne(s.id)}
+                  disabled={syncingId !== null}
+                  className="shrink-0 flex items-center gap-1 text-xs text-accent hover:underline disabled:opacity-50"
+                >
+                  {syncingId === s.id ? <Loader2 size={11} className="animate-spin" /> : <RefreshCw size={11} />} Sync
+                </button>
+                <button onClick={() => removeSource(s.id)} className="shrink-0 text-base-muted hover:text-accent-danger">
+                  <Trash2 size={12} />
+                </button>
+              </div>
+              {s.last_sync_status === 'error' ? (
+                <p className="text-xs text-accent-danger pl-8">{s.last_sync_error || "This calendar didn't sync."}</p>
+              ) : (
+                <p className="text-xs text-base-muted truncate pl-8">
+                  {s.last_synced_at ? `Last synced ${new Date(s.last_synced_at).toLocaleString()}` : 'Not synced yet'}
+                </p>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
+
+      <div className="grid grid-cols-2 gap-2 pt-2 border-t border-base-border">
+        <Field label="Name" value={draft.label} onChange={(v) => setDraft((d) => ({ ...d, label: v }))} placeholder="e.g. English, School events" />
+        <label className="block">
+          <span className="block text-xs font-medium text-base-muted mb-1">Color</span>
+          <input
+            type="color"
+            value={draft.color}
+            onChange={(e) => setDraft((d) => ({ ...d, color: e.target.value }))}
+            className="w-full h-9 rounded-lg border border-base-border bg-base-card"
+          />
+        </label>
+        <label className="block col-span-2">
+          <span className="block text-xs font-medium text-base-muted mb-1">ICS URL</span>
+          <input
+            value={draft.url}
+            onChange={(e) => setDraft((d) => ({ ...d, url: e.target.value }))}
+            placeholder="https://calendar.google.com/calendar/ical/…/private-…/basic.ics"
+            className="w-full bg-base-card border border-base-border rounded-lg px-3 py-2 text-xs text-base-text focus:outline-none focus:border-accent"
+          />
+        </label>
       </div>
+      <div className="flex items-center gap-2">
+        <SecondaryButton onClick={addSource} icon={<Plus size={13} />} label="Add calendar" />
+        {sources.length > 1 && (
+          <SecondaryButton onClick={syncAll} loading={syncingId === 'all'} icon={<RefreshCw size={13} />} label="Sync all" />
+        )}
+      </div>
+
       <StatusLine status={status} />
     </Section>
   );
@@ -117,13 +234,15 @@ function CalendarSyncSection() {
 
 // ---------- Google accounts (shared OAuth app; Calendar + Classroom scopes) ----------
 
-function GoogleAccountsSection() {
+function GoogleAccountsSection({ onAccountsChanged }) {
   const [clientId, setClientId] = useState('');
   const [clientSecret, setClientSecret] = useState('');
   const [accounts, setAccounts] = useState([]);
   const [newLabel, setNewLabel] = useState('Personal');
   const [connecting, setConnecting] = useState(false);
   const [status, setStatus] = useState(null);
+  const [authUrl, setAuthUrl] = useState(null);
+  const [copied, setCopied] = useState(false);
 
   async function loadAccounts() {
     setAccounts(await api.googleListAccounts());
@@ -137,31 +256,55 @@ function GoogleAccountsSection() {
     })();
   }, []);
 
-  async function handleConnect() {
+  // The main process pushes the consent URL as soon as it's built, well
+  // before googleConnect() resolves - shown below as a copyable fallback in
+  // case auto-launching the OS default browser opens the wrong one.
+  useEffect(() => {
+    const off = api.onGoogleAuthUrl?.(({ authUrl: url }) => setAuthUrl(url));
+    return () => off?.();
+  }, []);
+
+  async function handleConnect(calendarOnly = false) {
     if (!clientId || !clientSecret) {
       setStatus({ ok: false, message: 'Add your Client ID and Client Secret first.' });
       return;
     }
     setConnecting(true);
     setStatus(null);
+    setAuthUrl(null);
+    setCopied(false);
     try {
       await api.setSetting('google_client_id', clientId);
       await api.setSetting('google_client_secret', clientSecret, true);
-      setStatus({ ok: true, message: `Opened the Google consent screen for "${newLabel || 'this account'}" in your browser - finish signing in there.` });
-      const account = await api.googleConnect(newLabel || 'Google account');
+      setStatus({
+        ok: true,
+        message: `Opened the Google consent screen for "${newLabel || 'this account'}" (${
+          calendarOnly ? 'Calendar only' : 'Calendar + Classroom'
+        }) in your browser - finish signing in there.`
+      });
+      const account = await api.googleConnect(newLabel || 'Google account', calendarOnly);
       await loadAccounts();
+      onAccountsChanged?.();
       setStatus({ ok: true, message: `Connected ${account.email || account.label}. Now pick its calendars/courses below.` });
     } catch (e) {
       setStatus({ ok: false, message: e?.message || 'Could not connect that Google account.' });
     } finally {
       setConnecting(false);
+      setAuthUrl(null);
     }
+  }
+
+  function copyAuthUrl() {
+    navigator.clipboard.writeText(authUrl);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1500);
   }
 
   async function handleRemove(id) {
     if (!confirm('Disconnect this Google account? Its calendars and Classroom courses will stop syncing.')) return;
     await api.googleRemoveAccount(id);
     await loadAccounts();
+    onAccountsChanged?.();
   }
 
   return (
@@ -183,7 +326,14 @@ function GoogleAccountsSection() {
               <div className="min-w-0 flex items-center gap-2">
                 <ShieldCheck size={12} className="text-accent-good shrink-0" />
                 <div className="min-w-0">
-                  <p className="text-base-text font-medium truncate">{a.label}</p>
+                  <p className="text-base-text font-medium truncate flex items-center gap-2">
+                    {a.label}
+                    {a.scope === 'calendar_only' && (
+                      <span className="text-xs font-normal px-2 py-1 rounded-full bg-base-panel text-base-muted border border-base-border">
+                        Calendar only
+                      </span>
+                    )}
+                  </p>
                   {a.email && <p className="text-xs text-base-muted truncate">{a.email}</p>}
                 </div>
               </div>
@@ -202,12 +352,47 @@ function GoogleAccountsSection() {
           onChange={setNewLabel}
           placeholder="Personal or School"
         />
-        <SecondaryButton
-          onClick={handleConnect}
-          loading={connecting}
-          icon={<ExternalLink size={13} />}
-          label={connecting ? 'Waiting for Google sign-in…' : 'Connect a Google account'}
-        />
+        <div className="flex items-center gap-2 flex-wrap">
+          <SecondaryButton
+            onClick={() => handleConnect(false)}
+            loading={connecting}
+            icon={<ExternalLink size={13} />}
+            label={connecting ? 'Waiting for Google sign-in…' : 'Connect a Google account'}
+          />
+          <SecondaryButton
+            onClick={() => handleConnect(true)}
+            loading={connecting}
+            icon={<CalendarCheck2 size={13} />}
+            label="Connect (Calendar only)"
+          />
+        </div>
+        <p className="text-xs text-base-muted">
+          If your school blocks the Classroom scopes for this app (common with Workspace admin restrictions), try
+          "Calendar only" - it requests just Calendar access, which is sometimes allowed even when Classroom isn't.
+        </p>
+
+        {connecting && authUrl && (
+          <div className="space-y-2 pt-1">
+            <p className="text-xs text-base-muted">
+              Auto-opened your default browser. If that's the wrong one, copy this link into whichever
+              browser/profile you want signed in with instead:
+            </p>
+            <div className="flex items-center gap-2 bg-base-card border border-base-border rounded-lg px-3 py-2">
+              <input
+                readOnly
+                value={authUrl}
+                onFocus={(e) => e.target.select()}
+                className="flex-1 min-w-0 bg-transparent text-xs text-base-text focus:outline-none"
+              />
+              <button
+                onClick={copyAuthUrl}
+                className="shrink-0 flex items-center gap-1 text-xs font-medium text-accent hover:underline"
+              >
+                {copied ? <Check size={12} /> : <Copy size={12} />} {copied ? 'Copied' : 'Copy link'}
+              </button>
+            </div>
+          </div>
+        )}
       </div>
 
       <StatusLine status={status} />
@@ -217,7 +402,7 @@ function GoogleAccountsSection() {
 
 // ---------- Calendars (which of each connected account's calendars sync in) ----------
 
-function CalendarsSection() {
+function CalendarsSection({ refreshKey }) {
   const [accounts, setAccounts] = useState([]);
   const [byAccount, setByAccount] = useState({});
   const [loadingAccountId, setLoadingAccountId] = useState(null);
@@ -232,9 +417,11 @@ function CalendarsSection() {
     setByAccount(grouped);
   }
 
+  // Re-fetches whenever an account is connected/removed elsewhere on the
+  // page (see SettingsPage's googleAccountsVersion), not just on mount.
   useEffect(() => {
     loadAll();
-  }, []);
+  }, [refreshKey]);
 
   async function refreshForAccount(accountId) {
     setLoadingAccountId(accountId);
@@ -332,9 +519,10 @@ function CalendarsSection() {
 
 // ---------- Classroom (auto-homework + reminders) ----------
 
-function ClassroomSection() {
+function ClassroomSection({ refreshKey }) {
   const [accounts, setAccounts] = useState([]);
   const [byAccount, setByAccount] = useState({});
+  const [refreshedAccountIds, setRefreshedAccountIds] = useState(() => new Set());
   const [loadingAccountId, setLoadingAccountId] = useState(null);
   const [syncing, setSyncing] = useState(false);
   const [offsets, setOffsets] = useState('72,24,0');
@@ -350,10 +538,14 @@ function ClassroomSection() {
     setByAccount(grouped);
   }
 
+  // Re-fetches whenever an account is connected/removed elsewhere on the
+  // page (see SettingsPage's googleAccountsVersion), not just on mount -
+  // otherwise this kept showing "connect an account" even after one was
+  // already connected in the section above, just because it never re-checked.
   useEffect(() => {
     loadAll();
     api.getSetting('classroom_reminder_offsets_hours').then((v) => setOffsets(v || '72,24,0'));
-  }, []);
+  }, [refreshKey]);
 
   async function refreshForAccount(accountId) {
     setLoadingAccountId(accountId);
@@ -361,6 +553,7 @@ function ClassroomSection() {
     try {
       await api.googleListClassroomCourses(accountId);
       await loadAll();
+      setRefreshedAccountIds((s) => new Set(s).add(accountId));
     } catch (e) {
       setStatus({ ok: false, message: e?.message || 'Could not fetch Classroom courses for that account.' });
     } finally {
@@ -412,16 +605,26 @@ function ClassroomSection() {
                 {acc.label}
                 {acc.email ? ` · ${acc.email}` : ''}
               </p>
-              <button
-                onClick={() => refreshForAccount(acc.id)}
-                disabled={loadingAccountId === acc.id}
-                className="flex items-center gap-1 text-xs text-accent hover:underline disabled:opacity-50"
-              >
-                {loadingAccountId === acc.id ? <Loader2 size={11} className="animate-spin" /> : <RefreshCw size={11} />} Refresh courses
-              </button>
+              {acc.scope !== 'calendar_only' && (
+                <button
+                  onClick={() => refreshForAccount(acc.id)}
+                  disabled={loadingAccountId === acc.id}
+                  className="flex items-center gap-1 text-xs text-accent hover:underline disabled:opacity-50"
+                >
+                  {loadingAccountId === acc.id ? <Loader2 size={11} className="animate-spin" /> : <RefreshCw size={11} />} Refresh courses
+                </button>
+              )}
             </div>
-            {(byAccount[acc.id] || []).length === 0 ? (
-              <p className="text-xs text-base-muted">No courses loaded yet — click Refresh.</p>
+            {acc.scope === 'calendar_only' ? (
+              <p className="text-xs text-base-muted">
+                Connected with Calendar-only access — no Classroom permission to check for courses.
+              </p>
+            ) : (byAccount[acc.id] || []).length === 0 ? (
+              <p className="text-xs text-base-muted">
+                {refreshedAccountIds.has(acc.id)
+                  ? `No Classroom courses found on ${acc.label} — if Classroom lives on a different account, connect and refresh that one instead.`
+                  : 'No courses loaded yet — click Refresh.'}
+              </p>
             ) : (
               <ul className="space-y-1">
                 {byAccount[acc.id].map((row) => (

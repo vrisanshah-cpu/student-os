@@ -71,9 +71,15 @@ const invokeChannels = [
   'file:pickImage',
   'file:saveImageData',
 
-  'sync:powerschool',
   'sync:generateStudyBlocks',
   'sync:pushBlocksToGoogle',
+
+  'ics:listSources',
+  'ics:createSource',
+  'ics:updateSource',
+  'ics:deleteSource',
+  'ics:syncSource',
+  'ics:syncAll',
 
   'google:connect',
   'google:listAccounts',
@@ -107,7 +113,7 @@ const invokeChannels = [
 // timer; the renderer just listens). Kept to an explicit whitelist for the
 // same reason invokeChannels is - contextIsolation only means something if
 // the bridged surface is deliberately narrow.
-const pushChannels = ['calendar:refresh'];
+const pushChannels = ['calendar:refresh', 'google:authUrl'];
 
 contextBridge.exposeInMainWorld('studyOS', {
   invoke: (channel, ...args) => {
